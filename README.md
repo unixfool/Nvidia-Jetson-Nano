@@ -223,8 +223,6 @@ Requires=jetson-gpu-init.service
 
 ### jtop library detection
 
-<img src="https://github.com/unixfool/Nvidia-Jetson-Nano/blob/main/jtop.png">
-
 jtop reads libraries from the host system. These files make all libraries visible in the INFO tab:
 
 ```bash
@@ -482,6 +480,8 @@ source install/setup.bash
 ---
 
 ## 📈 jtop — System Monitor
+
+<img src="https://github.com/unixfool/Nvidia-Jetson-Nano/blob/main/jtop.png">
 
 ```bash
 jtop    # Open monitor
