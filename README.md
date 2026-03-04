@@ -223,6 +223,8 @@ Requires=jetson-gpu-init.service
 
 ### jtop library detection
 
+<img src="https://github.com/unixfool/Nvidia-Jetson-Nano/blob/main/jtop.png">
+
 jtop reads libraries from the host system. These files make all libraries visible in the INFO tab:
 
 ```bash
@@ -480,8 +482,6 @@ source install/setup.bash
 ---
 
 ## 📈 jtop — System Monitor
-
-<img src="https://github.com/unixfool/Nvidia-Jetson-Nano/blob/main/jtop.png">
 
 ```bash
 jtop    # Open monitor
@@ -805,5 +805,52 @@ jtop
 **For projects requiring the CSI IMX219 camera:**
 1. **Option A:** Use a USB camera — works instantly with OpenCV/V4L2
 2. **Option B:** Flash a new SD card with official JetPack 4.6 (Ubuntu 18.04), keeping the current SD as backup
+
+---
+
+## 🧠 TensorRT 8.2.1
+
+TensorRT C++ libraries natively installed on host. Python 3.12 bindings available inside Docker via ctypes wrapper (official bindings require Python 3.6).
+
+### Host installation
+
+```bash
+sudo apt install -y libnvinfer8 libnvinfer-plugin8 libnvparsers8 \
+    libnvonnxparsers8 libnvinfer-dev libnvinfer-bin libnvinfer-samples
+```
+
+### Python wrapper (inside container)
+
+Located at `/usr/local/lib/python3.12/site-packages/tensorrt/__init__.py`.
+Loads libnvinfer.so.8 via ctypes with correct dependency order.
+
+Required mounts — variable `JTRT` in `~/.bashrc`:
+
+```bash
+JTRT="-v /usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu \
+    -v /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra \
+    -v /usr/lib/aarch64-linux-gnu/tegra-egl:/usr/lib/aarch64-linux-gnu/tegra-egl \
+    -e LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra-egl:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu"
+```
+
+### trtexec — C++ inference tool
+
+```bash
+/usr/src/tensorrt/bin/trtexec --onnx=model.onnx --saveEngine=model.trt
+/usr/src/tensorrt/bin/trtexec --loadEngine=model.trt --batch=1
+```
+
+### Full stack verification
+
+```bash
+docker run --rm --network=host $JDEV $JGPIO $JSYS $JENV $JTRT \
+    jetson-ai:latest python3 -c "
+import cv2, numpy, Jetson.GPIO as GPIO, tensorrt as trt
+print('✅ OpenCV:',   cv2.__version__)
+print('✅ NumPy:',    numpy.__version__)
+print('✅ GPIO:',     GPIO.VERSION, GPIO.model)
+print('✅ TensorRT:', trt.__version__, trt.is_available())
+"
+```
 
 ---
