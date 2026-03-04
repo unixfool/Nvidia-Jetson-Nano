@@ -462,10 +462,7 @@ ROS2 is installed inside the `jetson-ai:latest` Docker container.
 
 ```bash
 # ROS2 interactive shell
-docker run -it --rm \
-    --network=host \
-    -v ~/jetson-workspace/ros2_ws:/workspace/ros2_ws \
-    jetson-ai:latest bash
+jros
 
 # Inside the container
 source /opt/ros/humble/setup.bash
@@ -476,6 +473,62 @@ source install/setup.bash
 ```
 
 **Workspace:** `~/jetson-workspace/ros2_ws/`
+
+### IMX219 Camera Node
+
+ROS2 package that captures RAW frames from the IMX219 sensor and publishes them as `sensor_msgs/Image`.
+
+**Package:** `~/jetson-workspace/ros2_ws/src/imx219_camera/`
+
+**Published topics:**
+
+| Topic | Type | Description |
+|---|---|---|
+| `/camera/image_raw` | `sensor_msgs/Image` | Debayered BGR image |
+| `/camera/camera_info` | `sensor_msgs/CameraInfo` | Camera metadata |
+
+**Parameters:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `fps` | 1 | Capture rate |
+| `scale` | 0.25 | Output scale (0.25=816x616) |
+| `exposure` | 2495 | Sensor exposure value |
+| `device` | /dev/video0 | V4L2 device |
+
+**Usage:**
+
+```bash
+# Start camera node (background)
+jcam_node
+
+# Check topics
+docker run --rm --network=host jetson-ai:latest bash -c "
+source /opt/ros/humble/setup.bash
+ros2 topic list
+ros2 topic hz /camera/image_raw
+"
+
+# View logs
+jcam_logs
+
+# Stop node
+jcam_stop
+
+# Build package
+docker run --rm --network=host $JDEV $JGPIO $JSYS $JENV $JCAM \
+    -v ~/jetson-workspace/ros2_ws:/ros2_ws \
+    jetson-ai:latest bash -c "
+source /opt/ros/humble/setup.bash && cd /ros2_ws
+colcon build --packages-select imx219_camera --symlink-install
+"
+```
+
+**Notes:**
+- Occasional v4l2-ctl timeouts are normal — node handles them gracefully
+- Output resolution at scale=0.25: 816x616
+- Output resolution at scale=0.5: 1632x1232
+- Output resolution at scale=1.0: 3264x2464
 
 ---
 
@@ -614,7 +667,10 @@ print('✅ I2C OK')
 | `jros` | ROS2 shell — full hardware access |
 | `jstatus` | System status summary |
 | `jfull` | Privileged shell with all devices |
-| `jcapture` | Capture image from IMX219 camera |
+| `jcapture` | Capture image from IMX219 (host) |
+| `jcam_node` | Start IMX219 ROS2 camera node (background) |
+| `jcam_stop` | Stop IMX219 ROS2 camera node |
+| `jcam_logs` | Follow camera node logs |
 | `jtemp` | CPU/GPU temperature |
 | `jgpu` | Current GPU frequency |
 | `jrestart` | Restart NVIDIA services |
@@ -852,5 +908,3 @@ print('✅ GPIO:',     GPIO.VERSION, GPIO.model)
 print('✅ TensorRT:', trt.__version__, trt.is_available())
 "
 ```
-
----
