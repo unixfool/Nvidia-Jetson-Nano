@@ -131,7 +131,13 @@ ssh jetbot@192.168.1.37     # via Ethernet
 | Jetson.GPIO | 2.1.12 | GPIO control |
 | smbus2 | 0.6.0 | I2C communication |
 | adafruit-blinka | 8.69.0 | CircuitPython on Jetson |
+| adafruit-circuitpython-ssd1306 | 2.12.22 | SSD1306 OLED display |
+| adafruit-circuitpython-ina219 | 3.5.0 | INA219 power monitor |
 | adafruit-servokit | 1.3.22 | PCA9685 servo control |
+| adafruit-circuitpython-pca9685 | 3.4.20 | PWM controller (motors) |
+| adafruit-circuitpython-motor | 3.4.18 | DC motor control |
+| psutil | 7.2.2 | System metrics |
+| Pillow | 12.1.1 | Image processing for OLED |
 | pyserial | 3.5 | UART communication |
 | ZRAM swap | 2GB | lzo compression, priority 100 |
 
@@ -291,6 +297,210 @@ EOF
 
 ---
 
+## 🔌 I2C Bus — Connected Devices
+
+The WaveShare JetBot expansion board exposes the following devices on I2C bus 1:
+
+| Address | Device | Function |
+|---|---|---|
+| `0x3C` | SSD1306 | OLED display 128x32 |
+| `0x41` | INA219 | Battery voltage/current/power monitor |
+| `0x60` | PCA9685 | PWM controller — DC motor driver |
+| `0x70` | PCA9685 | PCA9685 broadcast address (group) |
+
+Bus 2 (`0x50`, `0x57`) contains EEPROM chips — system use only.
+
+### Scan I2C devices
+
+```bash
+python3 << 'EOF'
+import smbus2
+for bus_num in range(9):
+    try:
+        bus = smbus2.SMBus(bus_num)
+        found = []
+        for addr in range(0x03, 0x78):
+            try:
+                bus.read_byte(addr)
+                found.append(hex(addr))
+            except:
+                pass
+        bus.close()
+        if found:
+            print(f"Bus {bus_num}: {found}")
+    except:
+        pass
+EOF
+```
+
+---
+
+## 📟 OLED Display (SSD1306 128x32)
+
+The WaveShare JetBot expansion board includes a 128x32 pixel OLED display (SSD1306 at I2C address `0x3C`).
+
+### Display content
+
+The OLED shows 3 lines updated every 5 seconds:
+
+```
+JETSON DASHBOARD
+IP 192.168.1.138
+CPU 12%  48C
+```
+
+- **Line 1** — Dashboard title (bold)
+- **Line 2** — Active WiFi IP address
+- **Line 3** — CPU usage % and CPU temperature °C
+
+### Required libraries (installed globally with sudo)
+
+```bash
+sudo pip3 install adafruit-circuitpython-ssd1306 --break-system-packages
+sudo pip3 install adafruit-blinka --break-system-packages
+sudo pip3 install Jetson.GPIO --break-system-packages
+sudo pip3 install psutil --break-system-packages
+sudo pip3 install Pillow --break-system-packages
+```
+
+### OLED service script (`/usr/local/bin/jetbot-oled.py`)
+
+```python
+#!/usr/bin/env python3
+"""
+JetBot OLED Display Service
+Updates every 5 seconds with IP, CPU and temperature
+"""
+import time, socket, psutil, board, busio
+import adafruit_ssd1306
+from PIL import Image, ImageDraw, ImageFont
+
+FONT_BIG   = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
+FONT_SMALL = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+OLED_ADDR  = 0x3C
+UPDATE_SEC = 5
+
+def get_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "no network"
+
+def get_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return int(f.read().strip()) / 1000.0
+    except:
+        return 0.0
+
+def main():
+    i2c  = busio.I2C(board.SCL, board.SDA)
+    oled = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c, addr=OLED_ADDR)
+    font_big   = ImageFont.truetype(FONT_BIG,   10)
+    font_small = ImageFont.truetype(FONT_SMALL,  8)
+
+    while True:
+        try:
+            ip   = get_ip()
+            cpu  = psutil.cpu_percent(interval=1)
+            temp = get_temp()
+
+            img  = Image.new("1", (128, 32))
+            draw = ImageDraw.Draw(img)
+            draw.text((0,  0), "JETSON DASHBOARD",             font=font_big,   fill=255)
+            draw.text((0, 13), f"IP {ip}",                     font=font_small, fill=255)
+            draw.text((0, 23), f"CPU {cpu:.0f}%  {temp:.0f}C", font=font_small, fill=255)
+
+            oled.image(img)
+            oled.show()
+        except Exception as e:
+            print(f"OLED error: {e}")
+
+        time.sleep(UPDATE_SEC)
+
+if __name__ == "__main__":
+    main()
+```
+
+### Systemd service (`/etc/systemd/system/jetbot-oled.service`)
+
+```ini
+[Unit]
+Description=JetBot OLED Display Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/jetbot-oled.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Enable and start
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable jetbot-oled
+sudo systemctl start jetbot-oled
+
+# Check status
+sudo systemctl status jetbot-oled
+
+# View logs
+sudo journalctl -u jetbot-oled -f
+```
+
+---
+
+## 🔋 Battery Monitor (INA219)
+
+The INA219 current/voltage sensor at I2C address `0x41` monitors the JetBot battery pack (3x 18650, ~12.6V fully charged).
+
+### Readings
+
+| Measurement | Description |
+|---|---|
+| Bus voltage | Battery pack voltage (V) |
+| Shunt voltage | Voltage drop across shunt resistor (mV) |
+| Current | Current draw (mA) |
+| Power | Power consumption (mW) |
+
+### Battery state reference
+
+| Voltage | State |
+|---|---|
+| 12.4 – 12.6V | Full |
+| 11.5 – 12.4V | Good |
+| 10.5 – 11.5V | Low |
+| < 10.5V | Critical — charge immediately |
+
+### Quick read
+
+```bash
+python3 << 'EOF'
+import board, busio, adafruit_ina219
+
+i2c = busio.I2C(board.SCL, board.SDA)
+ina = adafruit_ina219.INA219(i2c, addr=0x41)
+print(f"Voltage: {ina.bus_voltage:.2f} V")
+print(f"Current: {ina.current:.0f} mA")
+print(f"Power:   {ina.power:.0f} mW")
+EOF
+```
+
+---
+
 ## 🔄 Persistent Services
 
 | Service | Function | Status |
@@ -300,6 +510,7 @@ EOF
 | `zram-swap` | 2GB compressed swap | ✅ enabled |
 | `wpa_supplicant` | WiFi connection | ✅ enabled |
 | `jetson-stats-fix` | Symlink fix for jetson_stats | ✅ enabled |
+| `jetbot-oled` | OLED display — IP/CPU/Temp | ✅ enabled |
 
 ---
 
@@ -422,7 +633,6 @@ GPIO.cleanup()
 ```python
 import smbus2
 
-# Scan devices on I2C bus 1
 bus = smbus2.SMBus(1)
 for addr in range(0x03, 0x78):
     try:
@@ -439,8 +649,8 @@ bus.close()
 from adafruit_servokit import ServoKit
 
 kit = ServoKit(channels=16)
-kit.servo[0].angle = 90   # Servo 0 to 90 degrees
-kit.servo[1].angle = 0    # Servo 1 to 0 degrees
+kit.servo[0].angle = 90
+kit.servo[1].angle = 0
 ```
 
 ### DC motor control via PCA9685
@@ -449,9 +659,9 @@ kit.servo[1].angle = 0    # Servo 1 to 0 degrees
 from adafruit_motorkit import MotorKit
 
 kit = MotorKit()
-kit.motor1.throttle = 0.5   # 50% speed forward
-kit.motor1.throttle = -0.5  # 50% speed backward
-kit.motor1.throttle = 0     # Stop
+kit.motor1.throttle = 0.5    # 50% forward
+kit.motor1.throttle = -0.5   # 50% backward
+kit.motor1.throttle = 0      # Stop
 ```
 
 ---
@@ -499,47 +709,17 @@ ROS2 package that captures RAW frames from the IMX219 sensor and publishes them 
 **Usage:**
 
 ```bash
-# Start camera node (background)
-jcam_node
-
-# Check topics
-docker run --rm --network=host jetson-ai:latest bash -c "
-source /opt/ros/humble/setup.bash
-ros2 topic list
-ros2 topic hz /camera/image_raw
-"
-
-# View logs
-jcam_logs
-
-# Stop node
-jcam_stop
-
-# Build package
-docker run --rm --network=host $JDEV $JGPIO $JSYS $JENV $JCAM \
-    -v ~/jetson-workspace/ros2_ws:/ros2_ws \
-    jetson-ai:latest bash -c "
-source /opt/ros/humble/setup.bash && cd /ros2_ws
-colcon build --packages-select imx219_camera --symlink-install
-"
+jcam_node    # Start camera node (background)
+jcam_logs    # View logs
+jcam_stop    # Stop node
 ```
-
-**Notes:**
-- Occasional v4l2-ctl timeouts are normal — node handles them gracefully
-- Output resolution at scale=0.25: 816x616
-- Output resolution at scale=0.5: 1632x1232
-- Output resolution at scale=1.0: 3264x2464
 
 ---
 
 ## 📈 jtop — System Monitor
 
-<img src="https://github.com/unixfool/Nvidia-Jetson-Nano/blob/main/jtop.png">
-
 ```bash
 jtop    # Open monitor
-
-# Keyboard shortcuts
 # 1=ALL  2=GPU  3=CPU  4=MEM  5=ENG  6=CTRL  7=INFO  Q=Quit
 ```
 
@@ -553,14 +733,6 @@ jtop    # Open monitor
 | VPI | 2.0.0 | ✅ |
 | OpenCV | 4.13.0 | ✅ |
 
-**Notes:**
-- JetPack detected via `/etc/nv_tegra_release` (created manually)
-- GPU initialized via `jetson-gpu-init` service on boot
-- GPU path: `/sys/devices/57000000.gpu/`
-- `tegrastats` at `/usr/bin/tegrastats` (extracted from nvidia-l4t-tools)
-- Fan 0 RPM is normal — passive cooling at idle
-- `OpenCV with CUDA: NO` is expected — GPU-accelerated OpenCV is inside the Docker container
-
 ---
 
 ## 💾 ZRAM Swap
@@ -568,10 +740,9 @@ jtop    # Open monitor
 2GB compressed swap in RAM — persistent via systemd.
 
 ```bash
-swapon --show                          # Show active swap
-sudo systemctl status zram-swap        # Service status
-cat /proc/swaps                        # All swap devices
-free -h                                # Memory and swap usage
+swapon --show
+sudo systemctl status zram-swap
+free -h
 ```
 
 ---
@@ -603,11 +774,13 @@ free -h                                # Memory and swap usage
 └── systemd/system/
     ├── jetson-gpu-init.service     # GPU init on boot
     ├── jtop.service.d/             # jtop dependency override
-    └── zram-swap.service           # ZRAM swap
+    ├── zram-swap.service           # ZRAM swap
+    └── jetbot-oled.service         # OLED display service
 
 /usr/local/
 ├── cuda/version.txt                # CUDA version (for jtop detection)
-└── bin/opencv_version              # OpenCV version wrapper (for jtop detection)
+├── bin/opencv_version              # OpenCV version wrapper (for jtop detection)
+└── bin/jetbot-oled.py              # OLED display script
 
 /usr/bin/
 ├── tegrastats                      # GPU monitor (extracted from L4T)
@@ -621,62 +794,13 @@ free -h                                # Memory and swap usage
 
 ## 🐳 Docker — GPIO / I2C / Camera
 
-GPIO, I2C and camera are fully functional inside Docker containers. Required mounts and environment variables:
-
 | Variable | Value | Purpose |
 |---|---|---|
 | `JDEV` | nvhost devices | GPU access |
 | `JGPIO` | gpiochip0/1 + i2c-0/1/2 + ttyTHS1 | GPIO/I2C/UART |
 | `JCAM` | /dev/video0 | CSI camera |
-| `JSYS` | sys/class/gpio + sys/devices + sys/firmware + nv_tegra_release | GPIO detection |
+| `JSYS` | sys/class/gpio + sys/devices + sys/firmware | GPIO detection |
 | `JENV` | JETSON_TESTING_MODEL_NAME=JETSON_NANO | Model detection |
-
-```bash
-# GPIO test inside container
-docker run --rm --network=host $JDEV $JGPIO $JSYS $JENV $JIMG python3 -c "
-import Jetson.GPIO as GPIO
-GPIO.setmode(GPIO.BOARD)
-GPIO.setup(12, GPIO.OUT)
-GPIO.output(12, GPIO.HIGH)
-GPIO.cleanup()
-print('✅ GPIO OK')
-"
-
-# I2C scan inside container
-docker run --rm --network=host $JDEV $JGPIO $JSYS $JENV $JIMG python3 -c "
-import smbus2
-bus = smbus2.SMBus(1)
-devices = [hex(a) for a in range(0x03, 0x78) if not __import__('contextlib').suppress(Exception) or True]
-bus.close()
-print('✅ I2C OK')
-"
-```
-
-**Note:** The warning `pinmux checks not implemented for current device` is normal on Ubuntu 24 and does not affect functionality.
-
----
-
-## 🔑 Aliases (`~/.bashrc`)
-
-| Alias | Function |
-|---|---|
-| `jsh` | Interactive shell — GPU + GPIO + I2C + Camera |
-| `jmon` | jtop monitor |
-| `jlab` | Jupyter Lab on port 8888 — full hardware access |
-| `jpy` | Python 3.12 REPL — full hardware access |
-| `jros` | ROS2 shell — full hardware access |
-| `jstatus` | System status summary |
-| `jfull` | Privileged shell with all devices |
-| `jcapture` | Capture image from IMX219 (host) |
-| `jcam_node` | Start IMX219 ROS2 camera node (background) |
-| `jcam_stop` | Stop IMX219 ROS2 camera node |
-| `jcam_logs` | Follow camera node logs |
-| `jtemp` | CPU/GPU temperature |
-| `jgpu` | Current GPU frequency |
-| `jrestart` | Restart NVIDIA services |
-| `jdocker` | Docker stats and images |
-
-### `.bashrc` variables
 
 ```bash
 JIMG="jetson-ai:latest"
@@ -690,11 +814,29 @@ JENV="-e JETSON_TESTING_MODEL_NAME=JETSON_NANO"
 
 ---
 
+## 🔑 Aliases (`~/.bashrc`)
+
+| Alias | Function |
+|---|---|
+| `jsh` | Interactive shell — GPU + GPIO + I2C + Camera |
+| `jmon` | jtop monitor |
+| `jlab` | Jupyter Lab on port 8888 |
+| `jpy` | Python 3.12 REPL |
+| `jros` | ROS2 shell |
+| `jstatus` | System status summary |
+| `jfull` | Privileged shell with all devices |
+| `jcapture` | Capture image from IMX219 (host) |
+| `jcam_node` | Start IMX219 ROS2 camera node |
+| `jcam_stop` | Stop IMX219 ROS2 camera node |
+| `jcam_logs` | Follow camera node logs |
+| `jtemp` | CPU/GPU temperature |
+| `jgpu` | Current GPU frequency |
+| `jrestart` | Restart NVIDIA services |
+| `jdocker` | Docker stats and images |
+
+---
+
 ## 📷 CSI Camera IMX219
-
-The IMX219 (Raspberry Pi Camera v2) is detected and partially functional. Full color via nvargus-daemon is not possible on Ubuntu 24 without a complete JetPack installation, but RAW capture works.
-
-### Camera specs (detected via v4l2-ctl)
 
 | Property | Value |
 |---|---|
@@ -702,7 +844,6 @@ The IMX219 (Raspberry Pi Camera v2) is detected and partially functional. Full c
 | Sensor | IMX219 (i2c 7-0010) |
 | Format | RG10 — 10-bit Bayer RGRG/GBGB |
 | Bayer pattern | BG (COLOR_BayerBG2BGR) |
-| Sensor modes | 6 |
 
 ### Available resolutions
 
@@ -714,92 +855,12 @@ The IMX219 (Raspberry Pi Camera v2) is detected and partially functional. Full c
 | 1640x1232 | 30 fps |
 | 1280x720 | 60 fps |
 
-### RAW capture (working)
+### RAW capture
 
 ```bash
-# Capture RAW frame from host
 v4l2-ctl --device=/dev/video0 \
     --set-fmt-video=width=3264,height=2464,pixelformat=RG10 \
-    --stream-mmap \
-    --stream-count=1 \
-    --stream-to=/tmp/frame_raw.bin
-```
-
-### RAW to image conversion (Python)
-
-```python
-import numpy as np
-import cv2
-
-width, height = 3264, 2464
-raw = np.fromfile('/tmp/frame_raw.bin', dtype=np.uint8)
-raw16 = raw.view(np.uint16)
-frame = raw16[:width*height].reshape(height, width)
-
-# Normalize 10-bit to 8-bit
-frame_norm = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-# Debayer — pattern BG
-bgr = cv2.cvtColor(frame_norm, cv2.COLOR_BayerBG2BGR_EA)
-
-# White balance using white reference area
-b, g, r = cv2.split(bgr.astype(np.float32))
-h, w = bgr.shape[:2]
-zone = bgr[50:300, w//3:2*w//3]
-ref = float(zone[:,:,1].mean())
-b = np.clip(b * (ref / (float(zone[:,:,0].mean()) + 1e-6)), 0, 255)
-r = np.clip(r * (ref / (float(zone[:,:,2].mean()) + 1e-6)), 0, 255)
-result = cv2.merge([b, g, r]).astype(np.uint8)
-
-# CLAHE contrast enhancement
-lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
-clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8,8))
-lab[:,:,0] = clahe.apply(lab[:,:,0])
-result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-cv2.imwrite('/tmp/camera_output.jpg', result)
-```
-
-### nvargus-daemon status
-
-nvargus-daemon was successfully started on Ubuntu 24 after manually extracting and symlinking L4T libraries. However full color capture is blocked by two unresolvable issues on Ubuntu 24:
-
-1. **Sensor not found by nvargus** — device-tree incomplete without full JetPack
-2. **EGL display required** — nvargus ISP needs a physical or virtual EGL display for shader processing, not available headless
-
-Libraries installed to make nvargus-daemon start:
-
-```bash
-# From nvidia-l4t-3d-core
-sudo cp libnvidia-glsi.so.32.7.6 /usr/lib/aarch64-linux-gnu/tegra/
-sudo cp libnvidia-rmapi-tegra.so.32.7.6 /usr/lib/aarch64-linux-gnu/tegra/
-sudo cp libnvidia-eglcore.so.32.7.6 /usr/lib/aarch64-linux-gnu/tegra/
-sudo mkdir -p /usr/lib/aarch64-linux-gnu/tegra-egl/
-sudo cp tegra-egl/* /usr/lib/aarch64-linux-gnu/tegra-egl/
-
-# EGL symlinks
-sudo ln -sf /usr/lib/aarch64-linux-gnu/tegra/libEGL.so.1 /usr/lib/aarch64-linux-gnu/libEGL.so.1
-sudo ln -sf /usr/lib/aarch64-linux-gnu/tegra/libGLESv2.so.2 /usr/lib/aarch64-linux-gnu/libGLESv2.so.2
-
-# GStreamer plugin
-# libgstnvarguscamerasrc.so installed from nvidia-l4t-gstreamer
-# Plugin verified: gst-inspect-1.0 nvarguscamerasrc ✅
-```
-
-### Camera control (v4l2-ctl)
-
-```bash
-# Set gain
-v4l2-ctl --device=/dev/video0 --set-ctrl=gain=50
-
-# Set exposure
-v4l2-ctl --device=/dev/video0 --set-ctrl=exposure=5000
-
-# Set frame rate
-v4l2-ctl --device=/dev/video0 --set-ctrl=frame_rate=10000000
-
-# List all controls
-v4l2-ctl --device=/dev/video0 --list-ctrls
+    --stream-mmap --stream-count=1 --stream-to=/tmp/frame_raw.bin
 ```
 
 ---
@@ -808,11 +869,11 @@ v4l2-ctl --device=/dev/video0 --list-ctrls
 
 | Limitation | Cause | Solution |
 |---|---|---|
-| CSI IMX219 — no color | nvargus EGL display + device-tree incomplete on Ubuntu 24 | RAW capture works — use USB camera for full color |
-| nvargus full pipeline blocked | Shader compile requires physical EGL display | Not solvable without JetPack native install |
+| CSI IMX219 — no color | nvargus EGL display + device-tree incomplete | RAW capture works — use USB camera for full color |
+| nvargus full pipeline blocked | Shader compile requires EGL display | Not solvable without JetPack native install |
 | SPI not available | Not enabled in device tree | Requires device tree modification |
 | TensorRT not functional | Registered for jtop display only | Install natively per project needs |
-| OpenCV with CUDA: NO on host | OpenCV installed via pip without CUDA | Use Docker container where GPU is available |
+| OpenCV with CUDA: NO on host | OpenCV installed via pip without CUDA | Use Docker container |
 
 ---
 
@@ -843,12 +904,23 @@ swapon --show
 python3 -c "import Jetson.GPIO as GPIO; print('✅ GPIO:', GPIO.VERSION)"
 
 # 5. Services
-sudo systemctl is-active jetson-gpu-init jtop zram-swap
+sudo systemctl is-active jetson-gpu-init jtop zram-swap jetbot-oled
 
-# 6. CSI Camera RAW capture
+# 6. OLED display
+sudo systemctl status jetbot-oled
+
+# 7. Battery monitor
+python3 -c "
+import board, busio, adafruit_ina219
+i2c = busio.I2C(board.SCL, board.SDA)
+ina = adafruit_ina219.INA219(i2c, addr=0x41)
+print(f'✅ Battery: {ina.bus_voltage:.2f}V  {ina.current:.0f}mA')
+"
+
+# 8. CSI Camera
 v4l2-ctl --device=/dev/video0 --info 2>/dev/null | grep "Card type" && echo "✅ Camera detected"
 
-# 7. System monitor — check GPU tab (2) and INFO tab (7)
+# 9. System monitor
 jtop
 ```
 
@@ -866,21 +938,12 @@ jtop
 
 ## 🧠 TensorRT 8.2.1
 
-TensorRT C++ libraries natively installed on host. Python 3.12 bindings available inside Docker via ctypes wrapper (official bindings require Python 3.6).
-
-### Host installation
+TensorRT C++ libraries natively installed on host. Python 3.12 bindings available inside Docker via ctypes wrapper.
 
 ```bash
 sudo apt install -y libnvinfer8 libnvinfer-plugin8 libnvparsers8 \
     libnvonnxparsers8 libnvinfer-dev libnvinfer-bin libnvinfer-samples
 ```
-
-### Python wrapper (inside container)
-
-Located at `/usr/local/lib/python3.12/site-packages/tensorrt/__init__.py`.
-Loads libnvinfer.so.8 via ctypes with correct dependency order.
-
-Required mounts — variable `JTRT` in `~/.bashrc`:
 
 ```bash
 JTRT="-v /usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu \
@@ -889,22 +952,7 @@ JTRT="-v /usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu \
     -e LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra-egl:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu"
 ```
 
-### trtexec — C++ inference tool
-
 ```bash
 /usr/src/tensorrt/bin/trtexec --onnx=model.onnx --saveEngine=model.trt
 /usr/src/tensorrt/bin/trtexec --loadEngine=model.trt --batch=1
-```
-
-### Full stack verification
-
-```bash
-docker run --rm --network=host $JDEV $JGPIO $JSYS $JENV $JTRT \
-    jetson-ai:latest python3 -c "
-import cv2, numpy, Jetson.GPIO as GPIO, tensorrt as trt
-print('✅ OpenCV:',   cv2.__version__)
-print('✅ NumPy:',    numpy.__version__)
-print('✅ GPIO:',     GPIO.VERSION, GPIO.model)
-print('✅ TensorRT:', trt.__version__, trt.is_available())
-"
 ```
